@@ -1,6 +1,8 @@
+using FluentValidation;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using UrlShortener.DTOs;
+using UrlShortener.DTOs.Validators;
 using UrlShortener.Entities;
 using UrlShortener.Services;
 
@@ -17,6 +19,8 @@ builder.Services.AddDbContext<UrlDbContext>(options =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("UrlShortenerConnectionString"))
     );
 
+builder.Services.AddValidatorsFromAssemblyContaining<UrlRequestValidator>();
+
 var app = builder.Build();
 
 // Configure the HTTP request pipeline.
@@ -28,9 +32,17 @@ if (app.Environment.IsDevelopment())
 
 app.UseHttpsRedirection();
 
-app.MapPost("/shorter", async (UrlRequest request, UrlDbContext db, IUrlShortenerService urlShorteningService) => {
+app.MapPost("/shorter", async (UrlRequest request, 
+                                UrlDbContext db, 
+                                IUrlShortenerService urlShorteningService, 
+                                IValidator<UrlRequest> validator) =>
+{
+    var validation = await validator.ValidateAsync(request);
+    if (!validation.IsValid)
+    {
+        return Results.ValidationProblem(validation.ToDictionary());
+    }  
 
-    Console.WriteLine(request.Url);
     var code = urlShorteningService.GenerateCode();
 
     var result = new UrlShorter
