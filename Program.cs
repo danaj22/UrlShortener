@@ -1,6 +1,7 @@
 using FluentValidation;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using StackExchange.Redis;
 using UrlShortener.DTOs;
 using UrlShortener.DTOs.Validators;
 using UrlShortener.Entities;
@@ -20,6 +21,9 @@ builder.Services.AddDbContext<UrlDbContext>(options =>
     );
 
 builder.Services.AddValidatorsFromAssemblyContaining<UrlRequestValidator>();
+var redis = ConnectionMultiplexer.Connect(builder.Configuration.GetConnectionString("RedisConnectionString"));
+builder.Services.AddSingleton<IConnectionMultiplexer>(redis);
+builder.Services.AddSingleton<IRedisCacheService, RedisCacheService>();
 
 var app = builder.Build();
 
@@ -58,12 +62,21 @@ app.MapPost("/shorter", async (UrlRequest request,
     return Results.Ok(result.ShortUrl);
 });
 
-app.MapGet("/{code}", async (string code, UrlDbContext db) =>
+app.MapGet("/{code}", async (IRedisCacheService cacheService, string code, UrlDbContext db) =>
 {
+    var cacheKey = $"Url:{code}";
+    var cachedUrl = await cacheService.GetCacheValueAsync<UrlShorter>(cacheKey);
+    if (cachedUrl != null)
+    {
+        return Results.Redirect(cachedUrl.OriginUrl); ;
+    }
+
     var redirectUrl = await db.UrlShorteners.SingleOrDefaultAsync(x => x.Code == code);
 
     if (redirectUrl == null)
         return Results.NotFound();
+
+    await cacheService.SetCacheValueAsync(cacheKey, redirectUrl, TimeSpan.FromMinutes(10));
 
     return Results.Redirect(redirectUrl.OriginUrl);
 });
