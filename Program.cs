@@ -1,10 +1,14 @@
 using FluentValidation;
+using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.OpenApi.Models;
 using StackExchange.Redis;
+using System.Security.Claims;
 using UrlShortener.DTOs;
 using UrlShortener.DTOs.Validators;
 using UrlShortener.Entities;
+using UrlShortener.Extensions;
 using UrlShortener.Services;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -12,7 +16,7 @@ var builder = WebApplication.CreateBuilder(args);
 // Add services to the container.
 // Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
 builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
+builder.Services.ConfigureSwagger();
 
 builder.Services.AddTransient<IUrlShortenerService, UrlShortenerService>();
 
@@ -21,9 +25,20 @@ builder.Services.AddDbContext<UrlDbContext>(options =>
     );
 
 builder.Services.AddValidatorsFromAssemblyContaining<UrlRequestValidator>();
-var redis = ConnectionMultiplexer.Connect(builder.Configuration.GetConnectionString("RedisConnectionString"));
-builder.Services.AddSingleton<IConnectionMultiplexer>(redis);
-builder.Services.AddSingleton<IRedisCacheService, RedisCacheService>();
+builder.Services.ConfigureRedis(builder.Configuration.GetConnectionString("RedisConnectionString"));
+
+builder.Services.AddAuthentication().AddBearerToken(IdentityConstants.BearerScheme);
+builder.Services.AddAuthorizationBuilder();
+#region Identity
+builder.Services.AddDbContext<MyIdentityDbContext>(options =>
+    options
+    .UseInMemoryDatabase("AppDb"));
+    //.UseSqlServer(builder.Configuration.GetConnectionString("IdentityDb")));
+
+builder.Services.AddIdentityCore<IdentityUser>()
+    .AddEntityFrameworkStores<MyIdentityDbContext>()
+    .AddApiEndpoints();
+#endregion
 
 var app = builder.Build();
 
@@ -36,10 +51,13 @@ if (app.Environment.IsDevelopment())
 
 app.UseHttpsRedirection();
 
+app.MapIdentityApi<IdentityUser>();
+
 app.MapPost("/shorter", async (UrlRequest request, 
                                 UrlDbContext db, 
                                 IUrlShortenerService urlShorteningService, 
-                                IValidator<UrlRequest> validator) =>
+                                IValidator<UrlRequest> validator,
+                                ClaimsPrincipal user) =>
 {
     var validation = await validator.ValidateAsync(request);
     if (!validation.IsValid)
@@ -59,8 +77,8 @@ app.MapPost("/shorter", async (UrlRequest request,
     await db.UrlShorteners.AddAsync(result);
     await db.SaveChangesAsync();
 
-    return Results.Ok(result.ShortUrl);
-});
+    return Results.Ok(new { result.ShortUrl, user.Identity!.Name });
+}).RequireAuthorization();
 
 app.MapGet("/{code}", async (IRedisCacheService cacheService, string code, UrlDbContext db) =>
 {
@@ -68,7 +86,7 @@ app.MapGet("/{code}", async (IRedisCacheService cacheService, string code, UrlDb
     var cachedUrl = await cacheService.GetCacheValueAsync<UrlShorter>(cacheKey);
     if (cachedUrl != null)
     {
-        return Results.Redirect(cachedUrl.OriginUrl); ;
+        return Results.Redirect(cachedUrl.OriginUrl);
     }
 
     var redirectUrl = await db.UrlShorteners.SingleOrDefaultAsync(x => x.Code == code);
